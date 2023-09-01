@@ -12,7 +12,6 @@ use crate::response_body::ResponseBytes;
 use crate::response_body::ResponseBytesInner;
 use crate::slab::slab_drop;
 use crate::slab::slab_get;
-use crate::slab::slab_init;
 use crate::slab::slab_insert;
 use crate::slab::HttpRequestBodyAutocloser;
 use crate::slab::SlabId;
@@ -87,7 +86,7 @@ static USE_WRITEV: Lazy<bool> = Lazy::new(|| {
   false
 });
 
-const SLABID_ERROR_VALUE: f64 = -1.0; // Also in 00_serve.js
+const SLABID_ERROR_VALUE: f64 = 0.0; // Also in 00_serve.js
 
 /// All HTTP/2 connections start with this byte string.
 ///
@@ -142,7 +141,9 @@ pub fn op_http_upgrade_raw(
         Ok(None) => continue,
         Ok(Some((response, bytes))) => {
           let mut http = slab_get(slab_id.to_bits() as SlabId);
-          *http.response() = response;
+          http.with_response(|r| {
+            *r = response;
+          });
           http.complete();
           let mut upgraded = TokioIo::new(upgrade.await?);
           upgraded.write_all(&bytes).await?;
@@ -199,14 +200,15 @@ pub async fn op_http_upgrade_websocket_next(
   // Stage 1: set the response to 101 Switching Protocols and send it
   let upgrade = http.upgrade()?;
 
-  let response = http.response();
-  *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
-  for (name, value) in headers {
-    response.headers_mut().append(
-      HeaderName::from_bytes(&name).unwrap(),
-      HeaderValue::from_bytes(&value).unwrap(),
-    );
-  }
+  http.with_response(|response| {
+    *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+    for (name, value) in headers {
+      response.headers_mut().append(
+        HeaderName::from_bytes(&name).unwrap(),
+        HeaderValue::from_bytes(&value).unwrap(),
+      );
+    }
+  });
   http.complete();
 
   // Stage 2: wait for the request to finish upgrading
@@ -223,7 +225,9 @@ pub fn op_http_set_promise_complete(slab_id: f64, status: u16) {
   // The Javascript code should never provide a status that is invalid here (see 23_response.js), so we
   // will quitely ignore invalid values.
   if let Ok(code) = StatusCode::from_u16(status) {
-    *http.response().status_mut() = code;
+    http.with_response(|response| {
+      *response.status_mut() = code;
+    });
   }
   http.complete();
 }
@@ -237,62 +241,67 @@ where
   HTTP: HttpPropertyExtractor,
 {
   let http = slab_get(slab_id.to_bits() as SlabId);
-  let request_info = http.request_info();
-  let request_parts = http.request_parts();
-  let request_properties = HTTP::request_properties(
-    request_info,
-    &request_parts.uri,
-    &request_parts.headers,
-  );
+  http.with_request_parts(|request_parts| {
+    http.with_request_info(|request_info| {
+      let request_properties = HTTP::request_properties(
+        request_info,
+        &request_parts.uri,
+        &request_parts.headers,
+      );
 
-  let method: v8::Local<v8::Value> = v8::String::new_from_utf8(
-    scope,
-    request_parts.method.as_str().as_bytes(),
-    v8::NewStringType::Normal,
-  )
-  .unwrap()
-  .into();
-
-  let authority: v8::Local<v8::Value> = match request_properties.authority {
-    Some(authority) => v8::String::new_from_utf8(
-      scope,
-      authority.as_ref(),
-      v8::NewStringType::Normal,
-    )
-    .unwrap()
-    .into(),
-    None => v8::undefined(scope).into(),
-  };
-
-  // Only extract the path part - we handle authority elsewhere
-  let path = match &request_parts.uri.path_and_query() {
-    Some(path_and_query) => path_and_query.to_string(),
-    None => "".to_owned(),
-  };
-
-  let path: v8::Local<v8::Value> =
-    v8::String::new_from_utf8(scope, path.as_ref(), v8::NewStringType::Normal)
+      let method: v8::Local<v8::Value> = v8::String::new_from_utf8(
+        scope,
+        request_parts.method.as_str().as_bytes(),
+        v8::NewStringType::Normal,
+      )
       .unwrap()
       .into();
 
-  let peer_address: v8::Local<v8::Value> = v8::String::new_from_utf8(
-    scope,
-    request_info.peer_address.as_bytes(),
-    v8::NewStringType::Normal,
-  )
-  .unwrap()
-  .into();
+      let authority: v8::Local<v8::Value> = match request_properties.authority {
+        Some(authority) => v8::String::new_from_utf8(
+          scope,
+          authority.as_ref(),
+          v8::NewStringType::Normal,
+        )
+        .unwrap()
+        .into(),
+        None => v8::undefined(scope).into(),
+      };
 
-  let port: v8::Local<v8::Value> = match request_info.peer_port {
-    Some(port) => v8::Integer::new(scope, port.into()).into(),
-    None => v8::undefined(scope).into(),
-  };
+      // Only extract the path part - we handle authority elsewhere
+      let path = match &request_parts.uri.path_and_query() {
+        Some(path_and_query) => path_and_query.to_string(),
+        None => "".to_owned(),
+      };
 
-  let vec = [method, authority, path, peer_address, port];
-  let array = v8::Array::new_with_elements(scope, vec.as_slice());
-  let array_value: v8::Local<v8::Value> = array.into();
+      let path: v8::Local<v8::Value> = v8::String::new_from_utf8(
+        scope,
+        path.as_ref(),
+        v8::NewStringType::Normal,
+      )
+      .unwrap()
+      .into();
 
-  array_value.into()
+      let peer_address: v8::Local<v8::Value> = v8::String::new_from_utf8(
+        scope,
+        request_info.peer_address.as_bytes(),
+        v8::NewStringType::Normal,
+      )
+      .unwrap()
+      .into();
+
+      let port: v8::Local<v8::Value> = match request_info.peer_port {
+        Some(port) => v8::Integer::new(scope, port.into()).into(),
+        None => v8::undefined(scope).into(),
+      };
+
+      let vec = [method, authority, path, peer_address, port];
+      let array = v8::Array::new_with_elements(scope, vec.as_slice());
+      let array_value: v8::Local<v8::Value> = array.into();
+
+      array_value.into()
+    })
+  })
 }
 
 #[op2]
@@ -302,8 +311,10 @@ pub fn op_http_get_request_header(
   #[string] name: String,
 ) -> Option<ByteString> {
   let http = slab_get(slab_id.to_bits() as SlabId);
-  let value = http.request_parts().headers.get(name);
-  value.map(|value| value.as_bytes().into())
+  http.with_request_parts(|parts| {
+    let value = parts.headers.get(name);
+    value.map(|value| value.as_bytes().into())
+  })
 }
 
 #[op(v8)]
@@ -312,69 +323,71 @@ pub fn op_http_get_request_headers<'scope>(
   slab_id: f64,
 ) -> serde_v8::Value<'scope> {
   let http = slab_get(slab_id.to_bits() as SlabId);
-  let headers = &http.request_parts().headers;
-  // Two slots for each header key/value pair
-  let mut vec: SmallVec<[v8::Local<v8::Value>; 32]> =
-    SmallVec::with_capacity(headers.len() * 2);
+  http.with_request_parts(|parts| {
+    let headers = &parts.headers;
+    // Two slots for each header key/value pair
+    let mut vec: SmallVec<[v8::Local<v8::Value>; 32]> =
+      SmallVec::with_capacity(headers.len() * 2);
 
-  let mut cookies: Option<Vec<&[u8]>> = None;
-  for (name, value) in headers {
-    if name == COOKIE {
-      if let Some(ref mut cookies) = cookies {
-        cookies.push(value.as_bytes());
+    let mut cookies: Option<Vec<&[u8]>> = None;
+    for (name, value) in headers {
+      if name == COOKIE {
+        if let Some(ref mut cookies) = cookies {
+          cookies.push(value.as_bytes());
+        } else {
+          cookies = Some(vec![value.as_bytes()]);
+        }
       } else {
-        cookies = Some(vec![value.as_bytes()]);
+        vec.push(
+          v8::String::new_from_one_byte(
+            scope,
+            name.as_ref(),
+            v8::NewStringType::Normal,
+          )
+          .unwrap()
+          .into(),
+        );
+        vec.push(
+          v8::String::new_from_one_byte(
+            scope,
+            value.as_bytes(),
+            v8::NewStringType::Normal,
+          )
+          .unwrap()
+          .into(),
+        );
       }
-    } else {
+    }
+
+    // We treat cookies specially, because we don't want them to get them
+    // mangled by the `Headers` object in JS. What we do is take all cookie
+    // headers and concat them into a single cookie header, separated by
+    // semicolons.
+    // TODO(mmastrac): This should probably happen on the JS side on-demand
+    if let Some(cookies) = cookies {
+      let cookie_sep = "; ".as_bytes();
+
       vec.push(
-        v8::String::new_from_one_byte(
-          scope,
-          name.as_ref(),
-          v8::NewStringType::Normal,
-        )
-        .unwrap()
-        .into(),
+        v8::String::new_external_onebyte_static(scope, COOKIE.as_ref())
+          .unwrap()
+          .into(),
       );
       vec.push(
         v8::String::new_from_one_byte(
           scope,
-          value.as_bytes(),
+          cookies.join(cookie_sep).as_ref(),
           v8::NewStringType::Normal,
         )
         .unwrap()
         .into(),
       );
     }
-  }
 
-  // We treat cookies specially, because we don't want them to get them
-  // mangled by the `Headers` object in JS. What we do is take all cookie
-  // headers and concat them into a single cookie header, separated by
-  // semicolons.
-  // TODO(mmastrac): This should probably happen on the JS side on-demand
-  if let Some(cookies) = cookies {
-    let cookie_sep = "; ".as_bytes();
+    let array = v8::Array::new_with_elements(scope, vec.as_slice());
+    let array_value: v8::Local<v8::Value> = array.into();
 
-    vec.push(
-      v8::String::new_external_onebyte_static(scope, COOKIE.as_ref())
-        .unwrap()
-        .into(),
-    );
-    vec.push(
-      v8::String::new_from_one_byte(
-        scope,
-        cookies.join(cookie_sep).as_ref(),
-        v8::NewStringType::Normal,
-      )
-      .unwrap()
-      .into(),
-    );
-  }
-
-  let array = v8::Array::new_with_elements(scope, vec.as_slice());
-  let array_value: v8::Local<v8::Value> = array.into();
-
-  array_value.into()
+    array_value.into()
+  })
 }
 
 #[op2(fast)]
@@ -403,17 +416,19 @@ pub fn op_http_set_response_header(
   #[string(onebyte)] value: Cow<[u8]>,
 ) {
   let mut http = slab_get(slab_id.to_bits() as SlabId);
-  let resp_headers = http.response().headers_mut();
-  // These are valid latin-1 strings
-  let name = HeaderName::from_bytes(&name).unwrap();
-  let value = match value {
-    Cow::Borrowed(bytes) => HeaderValue::from_bytes(bytes).unwrap(),
-    // SAFETY: These are valid latin-1 strings
-    Cow::Owned(bytes_vec) => unsafe {
-      HeaderValue::from_maybe_shared_unchecked(bytes::Bytes::from(bytes_vec))
-    },
-  };
-  resp_headers.append(name, value);
+  http.with_response(|response| {
+    let resp_headers = response.headers_mut();
+    // These are valid latin-1 strings
+    let name = HeaderName::from_bytes(&name).unwrap();
+    let value = match value {
+      Cow::Borrowed(bytes) => HeaderValue::from_bytes(bytes).unwrap(),
+      // SAFETY: These are valid latin-1 strings
+      Cow::Owned(bytes_vec) => unsafe {
+        HeaderValue::from_maybe_shared_unchecked(bytes::Bytes::from(bytes_vec))
+      },
+    };
+    resp_headers.append(name, value);
+  });
 }
 
 #[op2]
@@ -424,26 +439,27 @@ pub fn op_http_set_response_headers(
 ) {
   let mut http = slab_get(slab_id.to_bits() as SlabId);
   // TODO(mmastrac): Invalid headers should be handled?
-  let resp_headers = http.response().headers_mut();
+  http.with_response(|response| {
+    let resp_headers = response.headers_mut();
+    let len = headers.length();
+    let header_len = len * 2;
+    resp_headers.reserve(header_len.try_into().unwrap());
 
-  let len = headers.length();
-  let header_len = len * 2;
-  resp_headers.reserve(header_len.try_into().unwrap());
+    for i in 0..len {
+      let item = headers.get_index(scope, i).unwrap();
+      let pair = v8::Local::<v8::Array>::try_from(item).unwrap();
+      let name = pair.get_index(scope, 0).unwrap();
+      let value = pair.get_index(scope, 1).unwrap();
 
-  for i in 0..len {
-    let item = headers.get_index(scope, i).unwrap();
-    let pair = v8::Local::<v8::Array>::try_from(item).unwrap();
-    let name = pair.get_index(scope, 0).unwrap();
-    let value = pair.get_index(scope, 1).unwrap();
-
-    let v8_name: ByteString = from_v8(scope, name).unwrap();
-    let v8_value: ByteString = from_v8(scope, value).unwrap();
-    let header_name = HeaderName::from_bytes(&v8_name).unwrap();
-    let header_value =
-      // SAFETY: These are valid latin-1 strings
-      unsafe { HeaderValue::from_maybe_shared_unchecked(v8_value) };
-    resp_headers.append(header_name, header_value);
-  }
+      let v8_name: ByteString = from_v8(scope, name).unwrap();
+      let v8_value: ByteString = from_v8(scope, value).unwrap();
+      let header_name = HeaderName::from_bytes(&v8_name).unwrap();
+      let header_value =
+        // SAFETY: These are valid latin-1 strings
+        unsafe { HeaderValue::from_maybe_shared_unchecked(v8_value) };
+      resp_headers.append(header_name, header_value);
+    }
+  });
 }
 
 #[op2]
@@ -460,7 +476,9 @@ pub fn op_http_set_response_trailers(
     let value = unsafe { HeaderValue::from_maybe_shared_unchecked(value) };
     trailer_map.append(name, value);
   }
-  *http.trailers().borrow_mut() = Some(trailer_map);
+  http.with_trailers(|trailers| {
+    *trailers.borrow_mut() = Some(trailer_map);
+  });
 }
 
 fn is_request_compressible(headers: &HeaderMap) -> Compression {
@@ -592,22 +610,24 @@ fn set_response(
   // do all of this work to send the response.
   if !http.cancelled() {
     let resource = http.take_resource();
-    let compression = is_request_compressible(&http.request_parts().headers);
-    let response = http.response();
-    let compression = modify_compressibility_from_response(
-      compression,
-      length,
-      response.headers_mut(),
-    );
-    response
-      .body_mut()
-      .initialize(response_fn(compression), resource);
+    let compression =
+      http.with_request_parts(|parts| is_request_compressible(&parts.headers));
+    http.with_response(|response| {
+      let compression = modify_compressibility_from_response(
+        compression,
+        length,
+        response.headers_mut(),
+      );
+      response
+        .body_mut()
+        .initialize(response_fn(compression), resource);
 
-    // The Javascript code should never provide a status that is invalid here (see 23_response.js), so we
-    // will quitely ignore invalid values.
-    if let Ok(code) = StatusCode::from_u16(status) {
-      *response.status_mut() = code;
-    }
+      // The Javascript code should never provide a status that is invalid here (see 23_response.js), so we
+      // will quitely ignore invalid values.
+      if let Ok(code) = StatusCode::from_u16(status) {
+        *response.status_mut() = code;
+      }
+    });
   }
   http.complete();
 }
@@ -895,8 +915,6 @@ pub fn op_http_serve<HTTP>(
 where
   HTTP: HttpPropertyExtractor,
 {
-  slab_init();
-
   let listener =
     HTTP::get_listener_for_rid(&mut state.borrow_mut(), listener_rid)?;
 
@@ -948,8 +966,6 @@ pub fn op_http_serve_on<HTTP>(
 where
   HTTP: HttpPropertyExtractor,
 {
-  slab_init();
-
   let connection =
     HTTP::get_connection_for_rid(&mut state.borrow_mut(), connection_rid)?;
 

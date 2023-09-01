@@ -67,7 +67,7 @@ const {
   op_http_wait,
 } = core.ensureFastOps();
 const _upgraded = Symbol("_upgraded");
-const SLABID_ERROR_VALUE = -1; // Also defined in http_next.rs
+const SLABID_ERROR_VALUE = 0; // Also defined in http_next.rs
 
 function internalServerError() {
   // "Internal Server Error"

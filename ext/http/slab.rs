@@ -10,15 +10,19 @@ use http::HeaderMap;
 use hyper1::body::Incoming;
 use hyper1::upgrade::OnUpgrade;
 
-use slab::Slab;
+use once_cell::sync::Lazy;
+use send_wrapper::SendWrapper;
+use sharded_slab::Config;
+use sharded_slab::OwnedEntry;
+use sharded_slab::Slab;
 use std::cell::RefCell;
-use std::cell::RefMut;
-use std::ptr::NonNull;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::RwLock;
 
 pub type Request = hyper1::Request<Incoming>;
 pub type Response = hyper1::Response<ResponseBytes>;
-pub type SlabId = u32;
+pub type SlabId = usize;
 
 enum RequestBodyState {
   Incoming(Incoming),
@@ -59,61 +63,59 @@ pub struct HttpSlabRecord {
   alive: bool,
 }
 
-thread_local! {
-  static SLAB: RefCell<Slab<HttpSlabRecord>> = const { RefCell::new(Slab::new()) };
+struct CustomConfig;
+impl Config for CustomConfig {
+  const INITIAL_PAGE_SIZE: usize = 1024;
 }
+
+static SLAB: Lazy<
+  Arc<Slab<RwLock<SendWrapper<HttpSlabRecord>>, CustomConfig>>,
+> = Lazy::new(|| {
+  let slab = Arc::new(Slab::new_with_config::<CustomConfig>());
+  let index = slab.insert(
+    // SAFETY:
+    // This value is never used an simply a placeholder to reserve index 0.
+    unsafe {
+      std::mem::transmute(
+        [0_u8; std::mem::size_of::<RwLock<SendWrapper<HttpSlabRecord>>>()],
+      )
+    },
+  );
+  assert_eq!(index, Some(0));
+  slab
+});
 
 macro_rules! http_trace {
   ($index:expr, $args:tt) => {
     #[cfg(feature = "__http_tracing")]
     {
-      let total = SLAB.with(|x| x.try_borrow().map(|x| x.len()));
-      if let Ok(total) = total {
-        println!("HTTP id={} total={}: {}", $index, total, format!($args));
-      } else {
-        println!("HTTP id={} total=?: {}", $index, format!($args));
-      }
+      println!("HTTP id={} total=?: {}", $index, format!($args),);
     }
   };
 }
 
 /// Hold a lock on the slab table and a reference to one entry in the table.
 pub struct SlabEntry(
-  NonNull<HttpSlabRecord>,
-  SlabId,
-  RefMut<'static, Slab<HttpSlabRecord>>,
+  OwnedEntry<RwLock<SendWrapper<HttpSlabRecord>>, CustomConfig>,
 );
 
-const SLAB_CAPACITY: usize = 1024;
-
-pub fn slab_init() {
-  SLAB.with(|slab: &RefCell<Slab<HttpSlabRecord>>| {
-    // Note that there might already be an active HTTP server, so this may just
-    // end up adding room for an additional SLAB_CAPACITY items. All HTTP servers
-    // on a single thread share the same slab.
-    let mut slab = slab.borrow_mut();
-    slab.reserve(SLAB_CAPACITY);
-  })
-}
-
 pub fn slab_get(index: SlabId) -> SlabEntry {
+  assert_ne!(index, 0);
   http_trace!(index, "slab_get");
-  let mut lock: RefMut<'static, Slab<HttpSlabRecord>> = SLAB.with(|x| {
-    // SAFETY: We're extracting a lock here and placing it into an object that is thread-local, !Send as a &'static
-    unsafe { std::mem::transmute(x.borrow_mut()) }
-  });
-  let Some(entry) = lock.get_mut(index as usize) else {
-    panic!("HTTP state error: Attempted to access invalid request {} ({} in total available)",
-    index,
-    lock.len())
+  let Some(entry) = SLAB.clone().get_owned(index) else {
+    panic!(
+      "HTTP state error: Attempted to access invalid request {}",
+      index
+    )
   };
   #[cfg(feature = "__zombie_http_tracking")]
   {
-    assert!(entry.alive, "HTTP state error: Entry is not alive");
+    assert!(
+      entry.read().unwrap().alive,
+      "HTTP state error: Entry is not alive"
+    );
   }
-  let entry = NonNull::new(entry as _).unwrap();
-
-  SlabEntry(entry, index, lock)
+  SlabEntry(entry)
 }
 
 #[allow(clippy::let_and_return)]
@@ -122,23 +124,26 @@ fn slab_insert_raw(
   request_body: Option<Incoming>,
   request_info: HttpConnectionProperties,
 ) -> SlabId {
-  let index = SLAB.with(|slab| {
-    let mut slab = slab.borrow_mut();
+  let index = {
     let body = ResponseBytes::default();
     let trailers = body.trailers();
     let request_body = request_body.map(|r| r.into());
-    slab.insert(HttpSlabRecord {
-      request_info,
-      request_parts,
-      request_body,
-      response: Some(Response::new(body)),
-      trailers,
-      been_dropped: false,
-      promise: CompletionHandle::default(),
-      #[cfg(feature = "__zombie_http_tracking")]
-      alive: true,
-    })
-  }) as u32;
+    SLAB
+      .clone()
+      .insert(RwLock::new(SendWrapper::new(HttpSlabRecord {
+        request_info,
+        request_parts,
+        request_body,
+        response: Some(Response::new(body)),
+        trailers,
+        been_dropped: false,
+        promise: CompletionHandle::default(),
+        #[cfg(feature = "__zombie_http_tracking")]
+        alive: true,
+      })))
+      .unwrap()
+  };
+  assert_ne!(index, 0);
   http_trace!(index, "slab_insert");
   index
 }
@@ -152,50 +157,42 @@ pub fn slab_insert(
 }
 
 pub fn slab_drop(index: SlabId) {
+  assert_ne!(index, 0);
   http_trace!(index, "slab_drop");
-  let mut entry = slab_get(index);
-  let record = entry.self_mut();
+  let SlabEntry(entry) = slab_get(index);
+  let mut record = entry.write().unwrap();
   assert!(
     !record.been_dropped,
     "HTTP state error: Entry has already been dropped"
   );
   record.been_dropped = true;
   if record.promise.is_completed() {
-    drop(entry);
+    drop(record);
     slab_expunge(index);
   }
 }
 
 fn slab_expunge(index: SlabId) {
-  SLAB.with(|slab| {
-    #[cfg(__zombie_http_tracking)]
-    {
-      slab.borrow_mut().get_mut(index as usize).unwrap().alive = false;
-    }
-    #[cfg(not(__zombie_http_tracking))]
-    {
-      slab.borrow_mut().remove(index as usize);
-    }
-  });
+  assert_ne!(index, 0);
+  #[cfg(__zombie_http_tracking)]
+  {
+    let entry = SLAB.get(index).unwrap();
+    let mut value = entry.get_mut().unwrap();
+    value.alive = false;
+  }
+  #[cfg(not(__zombie_http_tracking))]
+  {
+    SLAB.remove(index);
+  }
   http_trace!(index, "slab_expunge");
 }
 
 impl SlabEntry {
-  fn self_ref(&self) -> &HttpSlabRecord {
-    // SAFETY: We have the lock and we're borrowing lifetime from self
-    unsafe { self.0.as_ref() }
-  }
-
-  fn self_mut(&mut self) -> &mut HttpSlabRecord {
-    // SAFETY: We have the lock and we're borrowing lifetime from self
-    unsafe { self.0.as_mut() }
-  }
-
   /// Perform the Hyper upgrade on this entry.
   pub fn upgrade(&mut self) -> Result<OnUpgrade, AnyError> {
     // Manually perform the upgrade. We're peeking into hyper's underlying machinery here a bit
-    self
-      .self_mut()
+    let mut entry = self.0.write().unwrap();
+    entry
       .request_parts
       .extensions
       .remove::<OnUpgrade>()
@@ -204,7 +201,8 @@ impl SlabEntry {
 
   /// Take the Hyper body from this entry.
   pub fn take_body(&mut self) -> Option<Incoming> {
-    let body_holder = &mut self.self_mut().request_body;
+    let mut entry = self.0.write().unwrap();
+    let body_holder = &mut entry.request_body;
     let body = body_holder.take();
     match body {
       Some(RequestBodyState::Incoming(body)) => Some(body),
@@ -216,7 +214,8 @@ impl SlabEntry {
   }
 
   pub fn take_resource(&mut self) -> Option<HttpRequestBodyAutocloser> {
-    let body_holder = &mut self.self_mut().request_body;
+    let mut entry = self.0.write().unwrap();
+    let body_holder = &mut entry.request_body;
     let body = body_holder.take();
     match body {
       Some(RequestBodyState::Resource(res)) => Some(res),
@@ -231,22 +230,23 @@ impl SlabEntry {
   /// We cannot keep just the resource itself, as JS code might be reading from the resource ID
   /// to generate the response data (requiring us to keep it in the resource table).
   pub fn put_resource(&mut self, res: HttpRequestBodyAutocloser) {
-    self.self_mut().request_body = Some(RequestBodyState::Resource(res));
+    let mut entry = self.0.write().unwrap();
+    entry.request_body = Some(RequestBodyState::Resource(res));
   }
 
   /// Complete this entry, potentially expunging it if it is fully complete (ie: dropped as well).
   pub fn complete(self) {
-    let promise = &self.self_ref().promise;
+    let entry = self.0.read().unwrap();
     assert!(
-      !promise.is_completed(),
+      !entry.promise.is_completed(),
       "HTTP state error: Entry has already been completed"
     );
-    http_trace!(self.1, "SlabEntry::complete");
-    promise.complete(true);
+    http_trace!(self.0.key(), "SlabEntry::complete");
+    entry.promise.complete(true);
     // If we're all done, we need to drop ourself to release the lock before we expunge this record
-    if self.self_ref().been_dropped {
-      let index = self.1;
-      drop(self);
+    if entry.been_dropped {
+      let index = self.0.key();
+      drop(entry);
       slab_expunge(index);
     }
   }
@@ -254,48 +254,62 @@ impl SlabEntry {
   /// Has the future for this entry been dropped? ie, has the underlying TCP connection
   /// been closed?
   pub fn cancelled(&self) -> bool {
-    self.self_ref().been_dropped
+    let entry = self.0.read().unwrap();
+    entry.been_dropped
   }
 
   /// Get a mutable reference to the response.
-  pub fn response(&mut self) -> &mut Response {
-    self.self_mut().response.as_mut().unwrap()
+  pub fn with_response<F>(&mut self, func: F)
+  where
+    F: FnOnce(&mut Response),
+  {
+    let mut entry = self.0.write().unwrap();
+    func(entry.response.as_mut().unwrap());
   }
 
   /// Get a mutable reference to the trailers.
-  pub fn trailers(&mut self) -> &RefCell<Option<HeaderMap>> {
-    &self.self_mut().trailers
+  pub fn with_trailers<F>(&mut self, func: F)
+  where
+    F: FnOnce(&RefCell<Option<HeaderMap>>),
+  {
+    let entry = self.0.write().unwrap();
+    func(&entry.trailers);
   }
 
   /// Take the response.
   pub fn take_response(&mut self) -> Response {
-    self.self_mut().response.take().unwrap()
+    let mut entry = self.0.write().unwrap();
+    entry.response.take().unwrap()
   }
 
   /// Get a reference to the connection properties.
-  pub fn request_info(&self) -> &HttpConnectionProperties {
-    &self.self_ref().request_info
+  pub fn with_request_info<F, T>(&self, func: F) -> T
+  where
+    F: FnOnce(&HttpConnectionProperties) -> T,
+  {
+    let entry = self.0.read().unwrap();
+    func(&entry.request_info)
   }
 
   /// Get a reference to the request parts.
-  pub fn request_parts(&self) -> &Parts {
-    &self.self_ref().request_parts
+  pub fn with_request_parts<F, T>(&self, func: F) -> T
+  where
+    F: FnOnce(&Parts) -> T,
+  {
+    let entry = self.0.read().unwrap();
+    func(&entry.request_parts)
   }
 
   /// Get a reference to the completion handle.
   pub fn promise(&self) -> CompletionHandle {
-    self.self_ref().promise.clone()
+    let entry = self.0.read().unwrap();
+    entry.promise.clone()
   }
 
   /// Get a reference to the response body completion handle.
   pub fn body_promise(&self) -> CompletionHandle {
-    self
-      .self_ref()
-      .response
-      .as_ref()
-      .unwrap()
-      .body()
-      .completion_handle()
+    let entry = self.0.read().unwrap();
+    entry.response.as_ref().unwrap().body().completion_handle()
   }
 }
 
