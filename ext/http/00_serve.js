@@ -658,6 +658,7 @@ internals.serveHttpOnConnection = serveHttpOnConnection;
 
 export {
   addTrailers,
+  InnerRequest,
   serve,
   serveHttpOnConnection,
   serveHttpOnListener,

@@ -36,12 +36,14 @@ const {
   ArrayPrototypeSplice,
   ObjectKeys,
   ObjectPrototypeIsPrototypeOf,
+  ObjectSetPrototypeOf,
   RegExpPrototypeExec,
   StringPrototypeStartsWith,
   Symbol,
   SymbolFor,
   TypeError,
 } = primordials;
+const core = globalThis.Deno.core;
 
 const _request = Symbol("request");
 const _headers = Symbol("headers");
@@ -554,7 +556,9 @@ function toInnerRequest(request) {
  * @returns {Request}
  */
 function fromInnerRequest(inner, signal, guard) {
-  const request = webidl.createBranded(Request);
+  const request = core.createHostObject();
+  ObjectSetPrototypeOf(request, RequestPrototype);
+  request[webidl.brand] = webidl.brand;
   request[_request] = inner;
   request[_signal] = signal;
   request[_getHeaders] = () => headersFromHeaderList(inner.headerList, guard);
