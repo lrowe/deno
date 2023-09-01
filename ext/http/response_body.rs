@@ -1,9 +1,11 @@
 // Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
-use std::cell::RefCell;
 use std::future::Future;
 use std::io::Write;
+use std::ops::Deref;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::RwLock;
 use std::task::Waker;
 
 use brotli::enc::encode::BrotliEncoderParameter;
@@ -22,6 +24,7 @@ use hyper1::body::Body;
 use hyper1::body::Frame;
 use hyper1::body::SizeHint;
 use pin_project::pin_project;
+use send_wrapper::SendWrapper;
 
 use crate::slab::HttpRequestBodyAutocloser;
 
@@ -59,7 +62,7 @@ impl From<ResponseStreamResult> for Option<Result<Frame<BufView>, AnyError>> {
 
 #[derive(Clone, Debug, Default)]
 pub struct CompletionHandle {
-  inner: Rc<RefCell<CompletionHandleInner>>,
+  inner: Arc<RwLock<CompletionHandleInner>>,
 }
 
 #[derive(Debug, Default)]
@@ -71,7 +74,7 @@ struct CompletionHandleInner {
 
 impl CompletionHandle {
   pub fn complete(&self, success: bool) {
-    let mut mut_self = self.inner.borrow_mut();
+    let mut mut_self = self.inner.write().unwrap();
     mut_self.complete = true;
     mut_self.success = success;
     if let Some(waker) = mut_self.waker.take() {
@@ -81,7 +84,7 @@ impl CompletionHandle {
   }
 
   pub fn is_completed(&self) -> bool {
-    self.inner.borrow().complete
+    self.inner.read().unwrap().complete
   }
 }
 
@@ -92,7 +95,7 @@ impl Future for CompletionHandle {
     self: Pin<&mut Self>,
     cx: &mut std::task::Context<'_>,
   ) -> std::task::Poll<Self::Output> {
-    let mut mut_self = self.inner.borrow_mut();
+    let mut mut_self = self.inner.write().unwrap();
     if mut_self.complete {
       return std::task::Poll::Ready(mut_self.success);
     }
@@ -162,7 +165,7 @@ impl std::fmt::Debug for ResponseBytesInner {
 pub struct ResponseBytes {
   inner: ResponseBytesInner,
   completion_handle: CompletionHandle,
-  headers: Rc<RefCell<Option<HeaderMap>>>,
+  headers: Arc<RwLock<Option<HeaderMap>>>,
   res: Option<HttpRequestBodyAutocloser>,
 }
 
@@ -181,7 +184,7 @@ impl ResponseBytes {
     self.completion_handle.clone()
   }
 
-  pub fn trailers(&self) -> Rc<RefCell<Option<HeaderMap>>> {
+  pub fn trailers(&self) -> Arc<RwLock<Option<HeaderMap>>> {
     self.headers.clone()
   }
 
@@ -284,7 +287,7 @@ impl Body for ResponseBytes {
     let res = loop {
       let res = match &mut self.inner {
         ResponseBytesInner::Done | ResponseBytesInner::Empty => {
-          if let Some(trailers) = self.headers.borrow_mut().take() {
+          if let Some(trailers) = self.headers.write().unwrap().take() {
             return std::task::Poll::Ready(Some(Ok(Frame::trailers(trailers))));
           }
           unreachable!()
@@ -313,7 +316,7 @@ impl Body for ResponseBytes {
     };
 
     if matches!(res, ResponseStreamResult::EndOfStream) {
-      if let Some(trailers) = self.headers.borrow_mut().take() {
+      if let Some(trailers) = self.headers.write().unwrap().take() {
         return std::task::Poll::Ready(Some(Ok(Frame::trailers(trailers))));
       }
       self.complete(true);
@@ -325,7 +328,7 @@ impl Body for ResponseBytes {
     matches!(
       self.inner,
       ResponseBytesInner::Done | ResponseBytesInner::Empty
-    ) && self.headers.borrow_mut().is_none()
+    ) && self.headers.write().unwrap().is_none()
   }
 
   fn size_hint(&self) -> SizeHint {
@@ -344,8 +347,8 @@ impl Drop for ResponseBytes {
 
 pub struct ResourceBodyAdapter {
   auto_close: bool,
-  stm: Rc<dyn Resource>,
-  future: AsyncResult<BufView>,
+  stm: SendWrapper<Rc<dyn Resource>>,
+  future: SendWrapper<AsyncResult<BufView>>,
 }
 
 impl ResourceBodyAdapter {
@@ -353,8 +356,8 @@ impl ResourceBodyAdapter {
     let future = stm.clone().read(64 * 1024);
     ResourceBodyAdapter {
       auto_close,
-      stm,
-      future,
+      stm: SendWrapper::new(stm),
+      future: SendWrapper::new(future),
     }
   }
 }
@@ -390,12 +393,13 @@ impl PollFrame for ResourceBodyAdapter {
       Ok(buf) => {
         if buf.is_empty() {
           if self.auto_close {
-            self.stm.clone().close();
+            self.stm.deref().clone().close();
           }
           ResponseStreamResult::EndOfStream
         } else {
           // Re-arm the future
-          self.future = self.stm.clone().read(64 * 1024);
+          self.future =
+            SendWrapper::new(self.stm.deref().clone().read(64 * 1024));
           ResponseStreamResult::NonEmptyBuf(buf)
         }
       }
@@ -596,7 +600,7 @@ struct BrotliEncoderStateWrapper {
 #[pin_project]
 pub struct BrotliResponseStream {
   state: BrotliState,
-  stm: BrotliEncoderStateWrapper,
+  stm: SendWrapper<BrotliEncoderStateWrapper>,
   current_cursor: usize,
   output_written_so_far: usize,
   #[pin]
@@ -638,7 +642,7 @@ impl BrotliResponseStream {
       BrotliEncoderStateWrapper { stm }
     };
     Self {
-      stm,
+      stm: SendWrapper::new(stm),
       output_written_so_far: 0,
       current_cursor: 0,
       state: BrotliState::Streaming,
