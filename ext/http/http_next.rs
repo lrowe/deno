@@ -477,7 +477,7 @@ pub fn op_http_set_response_trailers(
     trailer_map.append(name, value);
   }
   http.with_trailers(|trailers| {
-    *trailers.borrow_mut() = Some(trailer_map);
+    *trailers.write().unwrap() = Some(trailer_map);
   });
 }
 

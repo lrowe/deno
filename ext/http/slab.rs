@@ -36,11 +36,14 @@ impl From<Incoming> for RequestBodyState {
 }
 
 /// Ensures that the request body closes itself when no longer needed.
-pub struct HttpRequestBodyAutocloser(ResourceId, Rc<RefCell<OpState>>);
+pub struct HttpRequestBodyAutocloser(
+  ResourceId,
+  SendWrapper<Rc<RefCell<OpState>>>,
+);
 
 impl HttpRequestBodyAutocloser {
   pub fn new(res: ResourceId, op_state: Rc<RefCell<OpState>>) -> Self {
-    Self(res, op_state)
+    Self(res, SendWrapper::new(op_state))
   }
 }
 
@@ -57,7 +60,7 @@ pub struct HttpSlabRecord {
   // The response may get taken before we tear this down
   response: Option<Response>,
   promise: CompletionHandle,
-  trailers: Rc<RefCell<Option<HeaderMap>>>,
+  trailers: Arc<RwLock<Option<HeaderMap>>>,
   been_dropped: bool,
   #[cfg(feature = "__zombie_http_tracking")]
   alive: bool,
@@ -68,22 +71,21 @@ impl Config for CustomConfig {
   const INITIAL_PAGE_SIZE: usize = 1024;
 }
 
-static SLAB: Lazy<
-  Arc<Slab<RwLock<SendWrapper<HttpSlabRecord>>, CustomConfig>>,
-> = Lazy::new(|| {
-  let slab = Arc::new(Slab::new_with_config::<CustomConfig>());
-  let index = slab.insert(
-    // SAFETY:
-    // This value is never used an simply a placeholder to reserve index 0.
-    unsafe {
-      std::mem::transmute(
-        [0_u8; std::mem::size_of::<RwLock<SendWrapper<HttpSlabRecord>>>()],
-      )
-    },
-  );
-  assert_eq!(index, Some(0));
-  slab
-});
+static SLAB: Lazy<Arc<Slab<RwLock<HttpSlabRecord>, CustomConfig>>> =
+  Lazy::new(|| {
+    let slab = Arc::new(Slab::new_with_config::<CustomConfig>());
+    let index = slab.insert(
+      // SAFETY:
+      // This value is never used an simply a placeholder to reserve index 0.
+      unsafe {
+        std::mem::transmute(
+          [0_u8; std::mem::size_of::<RwLock<HttpSlabRecord>>()],
+        )
+      },
+    );
+    assert_eq!(index, Some(0));
+    slab
+  });
 
 macro_rules! http_trace {
   ($index:expr, $args:tt) => {
@@ -95,9 +97,7 @@ macro_rules! http_trace {
 }
 
 /// Hold a lock on the slab table and a reference to one entry in the table.
-pub struct SlabEntry(
-  OwnedEntry<RwLock<SendWrapper<HttpSlabRecord>>, CustomConfig>,
-);
+pub struct SlabEntry(OwnedEntry<RwLock<HttpSlabRecord>, CustomConfig>);
 
 pub fn slab_get(index: SlabId) -> SlabEntry {
   assert_ne!(index, 0);
@@ -130,7 +130,7 @@ fn slab_insert_raw(
     let request_body = request_body.map(|r| r.into());
     SLAB
       .clone()
-      .insert(RwLock::new(SendWrapper::new(HttpSlabRecord {
+      .insert(RwLock::new(HttpSlabRecord {
         request_info,
         request_parts,
         request_body,
@@ -140,7 +140,7 @@ fn slab_insert_raw(
         promise: CompletionHandle::default(),
         #[cfg(feature = "__zombie_http_tracking")]
         alive: true,
-      })))
+      }))
       .unwrap()
   };
   assert_ne!(index, 0);
@@ -270,7 +270,7 @@ impl SlabEntry {
   /// Get a mutable reference to the trailers.
   pub fn with_trailers<F>(&mut self, func: F)
   where
-    F: FnOnce(&RefCell<Option<HeaderMap>>),
+    F: FnOnce(&RwLock<Option<HeaderMap>>),
   {
     let entry = self.0.write().unwrap();
     func(&entry.trailers);

@@ -15,7 +15,7 @@ use std::borrow::Cow;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::net::SocketAddrV4;
-use std::rc::Rc;
+use std::sync::Arc;
 
 // TODO(mmastrac): I don't like that we have to clone this, but it's one-time setup
 #[derive(Clone)]
@@ -28,7 +28,7 @@ pub struct HttpListenProperties {
 
 #[derive(Clone)]
 pub struct HttpConnectionProperties {
-  pub peer_address: Rc<str>,
+  pub peer_address: Arc<str>,
   pub peer_port: Option<u16>,
   pub local_port: Option<u16>,
   pub stream_type: NetworkStreamType,
@@ -161,9 +161,9 @@ impl HttpPropertyExtractor for DefaultHttpPropertyExtractor {
       NetworkStreamAddress::Unix(_) => None,
     };
     let peer_address = match peer_address {
-      NetworkStreamAddress::Ip(addr) => Rc::from(addr.ip().to_string()),
+      NetworkStreamAddress::Ip(addr) => Arc::from(addr.ip().to_string()),
       #[cfg(unix)]
-      NetworkStreamAddress::Unix(_) => Rc::from("unix"),
+      NetworkStreamAddress::Unix(_) => Arc::from("unix"),
     };
     let local_port = listen_properties.local_port;
     let stream_type = listen_properties.stream_type;
