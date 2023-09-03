@@ -9,6 +9,7 @@ use http::request::Parts;
 use http::HeaderMap;
 use hyper1::body::Incoming;
 use hyper1::upgrade::OnUpgrade;
+use tokio::sync::oneshot;
 
 use once_cell::sync::Lazy;
 use send_wrapper::SendWrapper;
@@ -36,20 +37,27 @@ impl From<Incoming> for RequestBodyState {
 }
 
 /// Ensures that the request body closes itself when no longer needed.
-pub struct HttpRequestBodyAutocloser(
-  ResourceId,
-  SendWrapper<Rc<RefCell<OpState>>>,
-);
+pub struct HttpRequestBodyAutocloser(Option<oneshot::Sender<()>>);
 
 impl HttpRequestBodyAutocloser {
   pub fn new(res: ResourceId, op_state: Rc<RefCell<OpState>>) -> Self {
-    Self(res, SendWrapper::new(op_state))
+    let (send, recv) = oneshot::channel::<()>();
+    // spawn requires send future but it stays on same thread.
+    // XXX could we use https://docs.rs/tokio/latest/tokio/task/struct.LocalSet.html?
+    let wrapped_op_state = SendWrapper::new(op_state);
+    tokio::spawn(async move {
+      _ = recv.await;
+      _ = wrapped_op_state.borrow_mut().resource_table.close(res);
+    });
+    Self(Some(send))
   }
 }
 
 impl Drop for HttpRequestBodyAutocloser {
   fn drop(&mut self) {
-    _ = self.1.borrow_mut().resource_table.close(self.0);
+    if let Some(sender) = self.0.take() {
+      _ = sender.send(());
+    }
   }
 }
 
