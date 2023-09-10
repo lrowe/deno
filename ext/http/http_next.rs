@@ -293,7 +293,31 @@ where
         None => v8::undefined(scope).into(),
       };
 
-      let vec = [method, authority, path, peer_address, port];
+      let scheme: v8::Local<v8::Value> = v8::String::new_from_utf8(
+        scope,
+        request_info.scheme.as_bytes(),
+        v8::NewStringType::Normal,
+      )
+      .unwrap()
+      .into();
+
+      let fallback_host: v8::Local<v8::Value> = v8::String::new_from_utf8(
+        scope,
+        request_info.fallback_host.as_bytes(),
+        v8::NewStringType::Normal,
+      )
+      .unwrap()
+      .into();
+
+      let vec = [
+        method,
+        authority,
+        path,
+        peer_address,
+        port,
+        scheme,
+        fallback_host,
+      ];
       let array = v8::Array::new_with_elements(scope, vec.as_slice());
       let array_value: v8::Local<v8::Value> = array.into();
 
@@ -903,7 +927,7 @@ impl Drop for HttpJoinHandle {
 pub fn op_http_serve<HTTP>(
   state: Rc<RefCell<OpState>>,
   #[smi] listener_rid: ResourceId,
-) -> Result<(ResourceId, &'static str, String), AnyError>
+) -> Result<(ResourceId, &'static str), AnyError>
 where
   HTTP: HttpPropertyExtractor,
 {
@@ -945,7 +969,6 @@ where
   Ok((
     state.borrow_mut().resource_table.add_rc(resource),
     listen_properties.scheme,
-    listen_properties.fallback_host,
   ))
 }
 
@@ -954,7 +977,7 @@ where
 pub fn op_http_serve_on<HTTP>(
   state: Rc<RefCell<OpState>>,
   #[smi] connection_rid: ResourceId,
-) -> Result<(ResourceId, &'static str, String), AnyError>
+) -> Result<(ResourceId, &'static str), AnyError>
 where
   HTTP: HttpPropertyExtractor,
 {
@@ -986,7 +1009,6 @@ where
   Ok((
     state.borrow_mut().resource_table.add_rc(resource),
     listen_properties.scheme,
-    listen_properties.fallback_host,
   ))
 }
 

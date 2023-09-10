@@ -21,7 +21,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct HttpListenProperties {
   pub scheme: &'static str,
-  pub fallback_host: String,
+  pub fallback_host: Arc<str>,
   pub local_port: Option<u16>,
   pub stream_type: NetworkStreamType,
 }
@@ -30,6 +30,8 @@ pub struct HttpListenProperties {
 pub struct HttpConnectionProperties {
   pub peer_address: Arc<str>,
   pub peer_port: Option<u16>,
+  pub scheme: &'static str,
+  pub fallback_host: Arc<str>,
   pub local_port: Option<u16>,
   pub stream_type: NetworkStreamType,
 }
@@ -165,12 +167,16 @@ impl HttpPropertyExtractor for DefaultHttpPropertyExtractor {
       #[cfg(unix)]
       NetworkStreamAddress::Unix(_) => Arc::from("unix"),
     };
+    let scheme = listen_properties.scheme;
+    let fallback_host = listen_properties.fallback_host.clone();
     let local_port = listen_properties.local_port;
     let stream_type = listen_properties.stream_type;
 
     HttpConnectionProperties {
       peer_address,
       peer_port,
+      scheme,
+      fallback_host,
       local_port,
       stream_type,
     }
@@ -198,7 +204,8 @@ fn listener_properties(
   local_address: NetworkStreamAddress,
 ) -> Result<HttpListenProperties, std::io::Error> {
   let scheme = req_scheme_from_stream_type(stream_type);
-  let fallback_host = req_host_from_addr(stream_type, &local_address);
+  let fallback_host =
+    Arc::from(req_host_from_addr(stream_type, &local_address));
   let local_port: Option<u16> = match local_address {
     NetworkStreamAddress::Ip(ip) => Some(ip.port()),
     #[cfg(unix)]
