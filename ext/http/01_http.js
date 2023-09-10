@@ -43,7 +43,11 @@ import {
   readableStreamForRid,
   ReadableStreamPrototype,
 } from "ext:deno_web/06_streams.js";
-import { serve } from "ext:deno_http/00_serve.js";
+import {
+  REQUEST_TRANSFERRED,
+  respondToRequest,
+  serve,
+} from "ext:deno_http/00_serve.js";
 const {
   ArrayPrototypeIncludes,
   ArrayPrototypeMap,
@@ -561,4 +565,12 @@ function buildCaseInsensitiveCommaValueFinder(checkText) {
 internals.buildCaseInsensitiveCommaValueFinder =
   buildCaseInsensitiveCommaValueFinder;
 
-export { _ws, HttpConn, serve, upgradeHttp, upgradeWebSocket };
+export {
+  _ws,
+  HttpConn,
+  REQUEST_TRANSFERRED,
+  respondToRequest,
+  serve,
+  upgradeHttp,
+  upgradeWebSocket,
+};
