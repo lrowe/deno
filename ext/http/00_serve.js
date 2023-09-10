@@ -120,16 +120,14 @@ function addTrailers(resp, headerList) {
 
 class InnerRequest {
   #slabId;
-  #context;
   #methodAndUri;
   #streamRid;
   #body;
   #upgraded;
   #urlValue;
 
-  constructor(slabId, context) {
+  constructor(slabId) {
     this.#slabId = slabId;
-    this.#context = context;
     this.#upgraded = false;
   }
 
@@ -259,15 +257,9 @@ class InnerRequest {
       return this.#urlValue = this.#methodAndUri[1];
     }
 
-    const hostname = this.#methodAndUri[1];
-    if (hostname) {
-      // Construct a URL from the scheme, the hostname, and the path
-      return this.#urlValue = this.#context.scheme + hostname + path;
-    }
-
-    // Construct a URL from the scheme, the fallback hostname, and the path
-    return this.#urlValue = this.#context.scheme + this.#context.fallbackHost +
-      path;
+    const scheme = this.#methodAndUri[5];
+    const hostnameOrFallback = this.#methodAndUri[1] ?? this.#methodAndUri[6];
+    return this.#urlValue = scheme + hostnameOrFallback + path;
   }
 
   get remoteAddr() {
@@ -331,21 +323,17 @@ class InnerRequest {
 
 class CallbackContext {
   abortController;
-  scheme;
-  fallbackHost;
   serverRid;
   closed;
 
-  constructor(signal, args) {
+  constructor(signal, serverRid) {
     signal?.addEventListener(
       "abort",
       () => this.close(),
       { once: true },
     );
     this.abortController = new AbortController();
-    this.serverRid = args[0];
-    this.scheme = args[1];
-    this.fallbackHost = args[2];
+    this.serverRid = serverRid;
     this.closed = false;
   }
 
@@ -431,7 +419,7 @@ function mapToCallback(context, callback, onError) {
     let response;
     try {
       if (hasCallback) {
-        innerRequest = new InnerRequest(req, context);
+        innerRequest = new InnerRequest(req);
         const request = fromInnerRequest(innerRequest, signal, "immutable");
         if (hasOneCallback) {
           response = await callback(request);
@@ -576,10 +564,11 @@ function serve(arg1, arg2) {
  * Serve HTTP/1.1 and/or HTTP/2 on an arbitrary listener.
  */
 function serveHttpOnListener(listener, signal, handler, onError, onListen) {
-  const context = new CallbackContext(signal, op_http_serve(listener.rid));
+  const { 0: serverRid, 1: scheme } = op_http_serve(listener.rid);
+  const context = new CallbackContext(signal, serverRid);
   const callback = mapToCallback(context, handler, onError);
 
-  onListen(context.scheme);
+  onListen(scheme);
 
   return serveHttpOn(context, callback);
 }
@@ -588,10 +577,11 @@ function serveHttpOnListener(listener, signal, handler, onError, onListen) {
  * Serve HTTP/1.1 and/or HTTP/2 on an arbitrary connection.
  */
 function serveHttpOnConnection(connection, signal, handler, onError, onListen) {
-  const context = new CallbackContext(signal, op_http_serve_on(connection.rid));
+  const { 0: serverRid, 1: scheme } = op_http_serve_on(connection.rid);
+  const context = new CallbackContext(signal, serverRid);
   const callback = mapToCallback(context, handler, onError);
 
-  onListen(context.scheme);
+  onListen(scheme);
 
   return serveHttpOn(context, callback);
 }

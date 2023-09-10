@@ -337,6 +337,8 @@ mod tests {
       HttpConnectionProperties {
         peer_address: "".into(),
         peer_port: None,
+        scheme: "",
+        fallback_host: "".into(),
         local_port: None,
         stream_type: NetworkStreamType::Tcp,
       },
