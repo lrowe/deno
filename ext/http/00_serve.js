@@ -68,6 +68,7 @@ const {
 } = core.ensureFastOps();
 const _upgraded = Symbol("_upgraded");
 const SLABID_ERROR_VALUE = 0; // Also defined in http_next.rs
+const REQUEST_TRANSFERRED = Symbol("Deno.http.REQUEST_TRANSFERRED");
 
 function internalServerError() {
   // "Internal Server Error"
@@ -441,6 +442,11 @@ function mapToCallback(context, callback, onError) {
       }
     }
 
+    // The request will be handled on another worker.
+    if (response === REQUEST_TRANSFERRED) {
+      return;
+    }
+
     const inner = toInnerResponse(response);
     if (innerRequest?.[_upgraded]) {
       // We're done here as the connection has been upgraded during the callback and no longer requires servicing.
@@ -460,19 +466,30 @@ function mapToCallback(context, callback, onError) {
       return;
     }
 
-    const status = inner.status;
-    const headers = inner.headerList;
-    if (headers && headers.length > 0) {
-      if (headers.length == 1) {
-        op_http_set_response_header(req, headers[0][0], headers[0][1]);
-      } else {
-        op_http_set_response_headers(req, headers);
-      }
-    }
-
-    fastSyncResponseOrStream(req, inner.body, status);
-    innerRequest?.close();
+    _respondToRequest(req, innerRequest, inner);
   };
+}
+
+function _respondToRequest(req, innerRequest, inner) {
+  const status = inner.status;
+  const headers = inner.headerList;
+  if (headers && headers.length > 0) {
+    if (headers.length == 1) {
+      op_http_set_response_header(req, headers[0][0], headers[0][1]);
+    } else {
+      op_http_set_response_headers(req, headers);
+    }
+  }
+
+  fastSyncResponseOrStream(req, inner.body, status);
+  innerRequest?.close();
+}
+
+function respondToRequest(request, response) {
+  const innerRequest = toInnerRequest(request);
+  const inner = toInnerResponse(response);
+  const req = innerRequest.slabId;
+  _respondToRequest(req, innerRequest, inner);
 }
 
 function serve(arg1, arg2) {
@@ -659,6 +676,8 @@ internals.serveHttpOnConnection = serveHttpOnConnection;
 
 export {
   addTrailers,
+  REQUEST_TRANSFERRED,
+  respondToRequest,
   serve,
   serveHttpOnConnection,
   serveHttpOnListener,
