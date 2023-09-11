@@ -67,6 +67,7 @@ const {
   op_http_wait,
 } = core.ensureFastOps();
 const _upgraded = Symbol("_upgraded");
+const SLABID_ERROR_VALUE = -1; // Also defined in http_next.rs
 
 function internalServerError() {
   // "Internal Server Error"
@@ -617,7 +618,7 @@ function serveHttpOn(context, callback) {
       try {
         // Attempt to pull as many requests out of the queue as possible before awaiting. This API is
         // a synchronous, non-blocking API that returns u32::MAX if anything goes wrong.
-        while ((req = op_http_try_wait(rid)) !== -1) {
+        while ((req = op_http_try_wait(rid)) !== SLABID_ERROR_VALUE) {
           PromisePrototypeCatch(callback(req), promiseErrorHandler);
         }
         currentPromise = op_http_wait(rid);
@@ -632,7 +633,7 @@ function serveHttpOn(context, callback) {
         }
         throw new Deno.errors.Http(error);
       }
-      if (req === -1) {
+      if (req === SLABID_ERROR_VALUE) {
         break;
       }
       PromisePrototypeCatch(callback(req), promiseErrorHandler);
