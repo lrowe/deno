@@ -127,7 +127,7 @@ pub fn op_http_upgrade_raw(
   slab_id: f64,
 ) -> Result<ResourceId, AnyError> {
   // Stage 1: extract the upgrade future
-  let upgrade = slab_get(slab_id as SlabId).upgrade()?;
+  let upgrade = slab_get(slab_id.to_bits() as SlabId).upgrade()?;
   let (read, write) = tokio::io::duplex(1024);
   let (read_rx, write_tx) = tokio::io::split(read);
   let (mut write_rx, mut read_tx) = tokio::io::split(write);
@@ -141,7 +141,7 @@ pub fn op_http_upgrade_raw(
       match upgrade_stream.write(&buf[..read]) {
         Ok(None) => continue,
         Ok(Some((response, bytes))) => {
-          let mut http = slab_get(slab_id as SlabId);
+          let mut http = slab_get(slab_id.to_bits() as SlabId);
           *http.response() = response;
           http.complete();
           let mut upgraded = TokioIo::new(upgrade.await?);
@@ -195,7 +195,7 @@ pub async fn op_http_upgrade_websocket_next(
   slab_id: f64,
   #[serde] headers: Vec<(ByteString, ByteString)>,
 ) -> Result<ResourceId, AnyError> {
-  let mut http = slab_get(slab_id as SlabId);
+  let mut http = slab_get(slab_id.to_bits() as SlabId);
   // Stage 1: set the response to 101 Switching Protocols and send it
   let upgrade = http.upgrade()?;
 
@@ -219,7 +219,7 @@ pub async fn op_http_upgrade_websocket_next(
 
 #[op2(fast)]
 pub fn op_http_set_promise_complete(slab_id: f64, status: u16) {
-  let mut http = slab_get(slab_id as SlabId);
+  let mut http = slab_get(slab_id.to_bits() as SlabId);
   // The Javascript code should never provide a status that is invalid here (see 23_response.js), so we
   // will quitely ignore invalid values.
   if let Ok(code) = StatusCode::from_u16(status) {
@@ -236,7 +236,7 @@ pub fn op_http_get_request_method_and_url<'scope, HTTP>(
 where
   HTTP: HttpPropertyExtractor,
 {
-  let http = slab_get(slab_id as SlabId);
+  let http = slab_get(slab_id.to_bits() as SlabId);
   let request_info = http.request_info();
   let request_parts = http.request_parts();
   let request_properties = HTTP::request_properties(
@@ -301,7 +301,7 @@ pub fn op_http_get_request_header(
   slab_id: f64,
   #[string] name: String,
 ) -> Option<ByteString> {
-  let http = slab_get(slab_id as SlabId);
+  let http = slab_get(slab_id.to_bits() as SlabId);
   let value = http.request_parts().headers.get(name);
   value.map(|value| value.as_bytes().into())
 }
@@ -311,7 +311,7 @@ pub fn op_http_get_request_headers<'scope>(
   scope: &mut v8::HandleScope<'scope>,
   slab_id: f64,
 ) -> serde_v8::Value<'scope> {
-  let http = slab_get(slab_id as SlabId);
+  let http = slab_get(slab_id.to_bits() as SlabId);
   let headers = &http.request_parts().headers;
   // Two slots for each header key/value pair
   let mut vec: SmallVec<[v8::Local<v8::Value>; 32]> =
@@ -383,7 +383,7 @@ pub fn op_http_read_request_body(
   state: Rc<RefCell<OpState>>,
   slab_id: f64,
 ) -> ResourceId {
-  let mut http = slab_get(slab_id as SlabId);
+  let mut http = slab_get(slab_id.to_bits() as SlabId);
   let rid = if let Some(incoming) = http.take_body() {
     let body_resource = Rc::new(HttpRequestBody::new(incoming));
     state.borrow_mut().resource_table.add_rc(body_resource)
@@ -402,7 +402,7 @@ pub fn op_http_set_response_header(
   #[string(onebyte)] name: Cow<[u8]>,
   #[string(onebyte)] value: Cow<[u8]>,
 ) {
-  let mut http = slab_get(slab_id as SlabId);
+  let mut http = slab_get(slab_id.to_bits() as SlabId);
   let resp_headers = http.response().headers_mut();
   // These are valid latin-1 strings
   let name = HeaderName::from_bytes(&name).unwrap();
@@ -422,7 +422,7 @@ pub fn op_http_set_response_headers(
   slab_id: f64,
   headers: v8::Local<v8::Array>,
 ) {
-  let mut http = slab_get(slab_id as SlabId);
+  let mut http = slab_get(slab_id.to_bits() as SlabId);
   // TODO(mmastrac): Invalid headers should be handled?
   let resp_headers = http.response().headers_mut();
 
@@ -451,7 +451,7 @@ pub fn op_http_set_response_trailers(
   slab_id: f64,
   #[serde] trailers: Vec<(ByteString, ByteString)>,
 ) {
-  let mut http = slab_get(slab_id as SlabId);
+  let mut http = slab_get(slab_id.to_bits() as SlabId);
   let mut trailer_map: HeaderMap = HeaderMap::with_capacity(trailers.len());
   for (name, value) in trailers {
     // These are valid latin-1 strings
@@ -637,7 +637,7 @@ pub fn op_http_set_response_body_resource(
   };
 
   set_response(
-    slab_id as SlabId,
+    slab_id.to_bits() as SlabId,
     resource.size_hint().1.map(|s| s as usize),
     status,
     move |compression| {
@@ -655,9 +655,14 @@ pub fn op_http_set_response_body_text(
   status: u16,
 ) {
   if !text.is_empty() {
-    set_response(slab_id as SlabId, Some(text.len()), status, |compression| {
-      ResponseBytesInner::from_vec(compression, text.into_bytes())
-    });
+    set_response(
+      slab_id.to_bits() as SlabId,
+      Some(text.len()),
+      status,
+      |compression| {
+        ResponseBytesInner::from_vec(compression, text.into_bytes())
+      },
+    );
   } else {
     op_http_set_promise_complete::call(slab_id, status);
   }
@@ -672,7 +677,7 @@ pub fn op_http_set_response_body_bytes(
 ) {
   if !buffer.is_empty() {
     set_response(
-      slab_id as SlabId,
+      slab_id.to_bits() as SlabId,
       Some(buffer.len()),
       status,
       |compression| {
@@ -690,7 +695,7 @@ pub async fn op_http_track(
   slab_id: f64,
   #[smi] server_rid: ResourceId,
 ) -> Result<(), AnyError> {
-  let http = slab_get(slab_id as SlabId);
+  let http = slab_get(slab_id.to_bits() as SlabId);
   let handle = http.body_promise();
 
   let join_handle = state
@@ -998,7 +1003,7 @@ pub fn op_http_try_wait(state: &mut OpState, #[smi] rid: ResourceId) -> f64 {
     return SLABID_ERROR_VALUE;
   };
 
-  id as f64
+  f64::from_bits(id as u64)
 }
 
 #[op2(async)]
@@ -1023,7 +1028,7 @@ pub async fn op_http_wait(
 
   // Do we have a request?
   if let Some(req) = next {
-    return Ok(req as f64);
+    return Ok(f64::from_bits(req as u64));
   }
 
   // No - we're shutting down
