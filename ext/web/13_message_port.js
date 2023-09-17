@@ -17,6 +17,14 @@ import {
   setIsTrusted,
 } from "ext:deno_web/02_event.js";
 import DOMException from "ext:deno_web/01_dom_exception.js";
+import {
+  fromInnerRequest,
+  RequestPrototype,
+  toInnerRequest,
+} from "ext:deno_fetch/23_request.js";
+import { InnerRequest } from "ext:deno_http/00_serve.js";
+import * as abortSignal from "ext:deno_web/03_abort_signal.js";
+
 const primordials = globalThis.__bootstrap.primordials;
 const {
   ArrayBufferPrototype,
@@ -218,6 +226,15 @@ function deserializeJsMessageData(messageData) {
         ArrayPrototypePush(hostObjects, port);
         break;
       }
+      case "request": {
+        const slabId = transferable.data;
+        const innerRequest = new InnerRequest(slabId);
+        const signal = abortSignal.newSignal();
+        const request = fromInnerRequest(innerRequest, signal, "immutable");
+        ArrayPrototypePush(transferables, request);
+        ArrayPrototypePush(hostObjects, request);
+        break;
+      }
       case "arrayBuffer": {
         ArrayPrototypePush(transferredArrayBuffers, transferable.data);
         const index = ArrayPrototypePush(transferables, null);
@@ -269,7 +286,9 @@ function serializeJsMessageData(data, transferables) {
   const serializedData = core.serialize(data, {
     hostObjects: ArrayPrototypeFilter(
       transferables,
-      (a) => ObjectPrototypeIsPrototypeOf(MessagePortPrototype, a),
+      (a) =>
+        ObjectPrototypeIsPrototypeOf(MessagePortPrototype, a) ||
+        ObjectPrototypeIsPrototypeOf(RequestPrototype, a),
     ),
     transferredArrayBuffers,
   }, (err) => {
@@ -295,6 +314,23 @@ function serializeJsMessageData(data, transferables) {
       ArrayPrototypePush(serializedTransferables, {
         kind: "messagePort",
         data: id,
+      });
+    } else if (
+      ObjectPrototypeIsPrototypeOf(RequestPrototype, transferable)
+    ) {
+      webidl.assertBranded(transferable, RequestPrototype);
+      const innerRequest = toInnerRequest(transferable);
+      const slabId = innerRequest?.slabId;
+      if (slabId === undefined) {
+        throw new DOMException(
+          "Request may only be transferred if created by Deno.serve",
+          "DataCloneError",
+        );
+      }
+      // XXX: transferable[_id] = null;
+      ArrayPrototypePush(serializedTransferables, {
+        kind: "request",
+        data: slabId,
       });
     } else if (
       ObjectPrototypeIsPrototypeOf(ArrayBufferPrototype, transferable)

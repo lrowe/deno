@@ -23,6 +23,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 enum Transferable {
   MessagePort(MessagePort),
+  Request(f64),
   ArrayBuffer(u32),
 }
 
@@ -135,6 +136,7 @@ pub fn op_message_port_create_entangled(
 pub enum JsTransferable {
   #[serde(rename_all = "camelCase")]
   MessagePort(ResourceId),
+  Request(f64),
   ArrayBuffer(u32),
 }
 
@@ -154,6 +156,9 @@ fn deserialize_js_transferables(
         let resource = Rc::try_unwrap(resource)
           .map_err(|_| type_error("Message port is not ready for transfer"))?;
         transferables.push(Transferable::MessagePort(resource.port));
+      }
+      JsTransferable::Request(slab_id) => {
+        transferables.push(Transferable::Request(slab_id));
       }
       JsTransferable::ArrayBuffer(id) => {
         transferables.push(Transferable::ArrayBuffer(id));
@@ -176,6 +181,9 @@ fn serialize_transferables(
           cancel: CancelHandle::new(),
         });
         js_transferables.push(JsTransferable::MessagePort(rid));
+      }
+      Transferable::Request(slab_id) => {
+        js_transferables.push(JsTransferable::Request(slab_id));
       }
       Transferable::ArrayBuffer(id) => {
         js_transferables.push(JsTransferable::ArrayBuffer(id));

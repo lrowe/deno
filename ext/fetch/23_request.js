@@ -42,6 +42,7 @@ const {
   SymbolFor,
   TypeError,
 } = primordials;
+const { hostObjectBrand } = globalThis.Deno.core;
 
 const _request = Symbol("request");
 const _headers = Symbol("headers");
@@ -555,6 +556,7 @@ function toInnerRequest(request) {
  */
 function fromInnerRequest(inner, signal, guard) {
   const request = webidl.createBranded(Request);
+  request[hostObjectBrand] = hostObjectBrand;
   request[_request] = inner;
   request[_signal] = signal;
   request[_getHeaders] = () => headersFromHeaderList(inner.headerList, guard);

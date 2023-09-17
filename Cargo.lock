@@ -1606,6 +1606,7 @@ dependencies = [
  "deno_bench_util",
  "deno_console",
  "deno_core",
+ "deno_http",
  "deno_url",
  "deno_webidl",
  "encoding_rs",
