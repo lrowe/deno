@@ -1403,7 +1403,6 @@ dependencies = [
  "ring",
  "scopeguard",
  "serde",
- "slab",
  "smallvec",
  "thiserror",
  "tokio",
