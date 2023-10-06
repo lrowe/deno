@@ -136,14 +136,18 @@ impl HttpRecord {
     let trailers = body.trailers();
     let request_body = Some(request_body.into());
     let mut response = Response::new(body);
-    let reuse_record =
+    let record =
       if let Some((record, headers)) = server_state.0.borrow_mut().pool.pop() {
         *response.headers_mut() = headers;
-        Some(record)
+        http_trace!(record, "HttpRecord::reuse");
+        record
       } else {
-        None
+        #[allow(clippy::let_and_return)]
+        let record = Rc::new(Self(RefCell::new(None)));
+        http_trace!(record, "HttpRecord::new");
+        record
       };
-    let inner = HttpRecordInner {
+    *record.0.borrow_mut() = Some(HttpRecordInner {
       server_state,
       request_info,
       request_parts,
@@ -153,17 +157,8 @@ impl HttpRecord {
       response_waker: None,
       trailers,
       been_dropped: false,
-    };
-    if let Some(record) = reuse_record {
-      *record.0.borrow_mut() = Some(inner);
-      http_trace!(record, "HttpRecord::reuse");
-      record
-    } else {
-      #[allow(clippy::let_and_return)]
-      let record = Rc::new(Self(RefCell::new(Some(inner))));
-      http_trace!(record, "HttpRecord::new");
-      record
-    }
+    });
+    record
   }
 
   fn recycle(self: Rc<Self>) {
