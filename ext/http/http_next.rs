@@ -657,8 +657,10 @@ fn set_response(
   http.complete();
 }
 
-#[op2(fast)]
-pub fn op_http_set_response_body_resource(
+/// Returned promise resolves when body streaming finishes.
+/// Call [`op_http_finalizer_complete`] when done with the external.
+#[op2(async)]
+pub async fn op_http_set_response_body_resource(
   state: Rc<RefCell<OpState>>,
   external: *const c_void,
   #[smi] stream_rid: ResourceId,
@@ -666,8 +668,9 @@ pub fn op_http_set_response_body_resource(
   status: u16,
 ) -> Result<(), AnyError> {
   let http =
-    // SAFETY: external is deleted before calling this op.
-    unsafe { take_external!(external, "op_http_set_response_body_resource") };
+    // SAFETY: op is called with external.
+    unsafe { clone_external!(external, "op_http_set_response_body_resource") };
+  http.finalizer_add();
 
   // IMPORTANT: We might end up requiring the OpState lock in set_response if we need to drop the request
   // body resource so we _cannot_ hold the OpState lock longer than necessary.
@@ -686,7 +689,7 @@ pub fn op_http_set_response_body_resource(
   };
 
   set_response(
-    http,
+    http.clone(),
     resource.size_hint().1.map(|s| s as usize),
     status,
     true,
@@ -695,7 +698,17 @@ pub fn op_http_set_response_body_resource(
     },
   );
 
+  http.into_body_promise().await;
   Ok(())
+}
+
+#[op2(fast)]
+pub fn op_http_finalizer_complete(external: *const c_void) {
+  // SAFETY: external is deleted and add_finalizer called before calling this op.
+  unsafe {
+    let http = take_external!(external, "op_http_finalizer_complete");
+    http.finalizer_complete();
+  }
 }
 
 #[op2(fast)]
@@ -736,29 +749,13 @@ pub fn op_http_set_response_body_bytes(
 }
 
 #[op2(async)]
-pub async fn op_http_track(
-  state: Rc<RefCell<OpState>>,
-  external: *const c_void,
-  #[smi] server_rid: ResourceId,
-) -> Result<(), AnyError> {
+pub async fn op_http_track(external: *const c_void) -> Result<(), AnyError> {
   // SAFETY: op is called with external.
   let http = unsafe { clone_external!(external, "op_http_track") };
-  let handle = http.into_body_promise();
-
-  let join_handle = state
-    .borrow_mut()
-    .resource_table
-    .get::<HttpJoinHandle>(server_rid)?;
-
-  match handle
-    .or_cancel(join_handle.connection_cancel_handle())
-    .await
-  {
-    Ok(true) => Ok(()),
-    Ok(false) => {
-      Err(AnyError::msg("connection closed before message completed"))
-    }
-    Err(_e) => Ok(()),
+  if http.into_body_promise().await {
+    Ok(())
+  } else {
+    Err(AnyError::msg("connection closed before message completed"))
   }
 }
 
@@ -1171,6 +1168,8 @@ pub async fn op_http_close(
     // In a forceful shutdown, we close everything
     join_handle.listen_cancel_handle().cancel();
     join_handle.connection_cancel_handle().cancel();
+    // Give streaming responses a tick to close
+    tokio::task::yield_now().await;
   }
 
   let mut join_handle = RcRef::map(&join_handle, |this| &this.join_handle)

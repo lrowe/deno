@@ -154,6 +154,7 @@ struct HttpRecordInner {
   completion_handle: Option<CompletionHandle>,
   trailers: Option<HeaderMap>,
   been_dropped: bool,
+  finalizers: usize,
 }
 
 pub struct HttpRecord(RefCell<Option<HttpRecordInner>>);
@@ -190,8 +191,27 @@ impl HttpRecord {
       completion_handle: None,
       trailers: None,
       been_dropped: false,
+      finalizers: 1,
     });
     record
+  }
+
+  fn finish(self: Rc<Self>, success: bool) {
+    let mut inner = self.self_mut();
+    http_trace!(
+      self,
+      "HttpRecord::finish success={} finalizers={}",
+      success,
+      inner.finalizers
+    );
+    if let Some(completion_handle) = inner.completion_handle.take() {
+      completion_handle.complete(success);
+    }
+    drop(inner);
+    // SAFETY: called exactly onece `new` initializes finalizers to 1.
+    unsafe {
+      self.finalizer_complete();
+    }
   }
 
   fn recycle(self: Rc<Self>) {
@@ -204,6 +224,7 @@ impl HttpRecord {
       request_parts: Parts { mut headers, .. },
       ..
     } = self.0.borrow_mut().take().unwrap();
+
     let mut server_state_mut = server_state.0.borrow_mut();
     let inflight = Rc::strong_count(&server_state);
     http_trace!(self, "HttpRecord::recycle inflight={}", inflight);
@@ -274,7 +295,7 @@ impl HttpRecord {
     if inner.response_ready {
       // Future dropped between wake() and async fn resuming.
       drop(inner);
-      self.recycle();
+      self.finish(false);
       return;
     }
     inner.been_dropped = true;
@@ -292,7 +313,7 @@ impl HttpRecord {
     );
     if inner.been_dropped {
       drop(inner);
-      self.recycle();
+      self.finish(false);
       return;
     }
     inner.response_ready = true;
@@ -333,6 +354,21 @@ impl HttpRecord {
     let mut inner = self.self_mut();
     debug_assert!(matches!(inner.response_body, ResponseBytesInner::Empty));
     inner.response_body = response_body;
+  }
+
+  /// Finalizers keep the record alive until the matching finalizer_complete is called.
+  pub fn finalizer_add(&self) {
+    self.self_mut().finalizers += 1;
+  }
+
+  /// Must be called exactly once per finalizer_add.
+  pub unsafe fn finalizer_complete(self: Rc<Self>) {
+    let mut inner = self.self_mut();
+    inner.finalizers -= 1;
+    if inner.finalizers == 0 {
+      drop(inner);
+      self.recycle();
+    }
   }
 
   /// Take the response.
@@ -464,17 +500,12 @@ impl Drop for HttpRecordResponse {
     // SAFETY: this ManuallyDrop is not used again.
     let record = unsafe { ManuallyDrop::take(&mut self.0) };
     http_trace!(record, "HttpRecordResponse::drop");
-    {
-      let inner = record.self_ref();
-      if let Some(completion_handle) = inner.completion_handle.as_ref() {
-        // We won't actually poll_frame for Empty responses so this is where we return success
-        completion_handle.complete(matches!(
-          inner.response_body,
-          ResponseBytesInner::Empty | ResponseBytesInner::Done
-        ));
-      }
-    }
-    record.recycle();
+    // We won't actually poll_frame for Empty responses so this is where we return success
+    let success = matches!(
+      record.self_ref().response_body,
+      ResponseBytesInner::Empty | ResponseBytesInner::Done
+    );
+    record.finish(success);
   }
 }
 
