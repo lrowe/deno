@@ -173,6 +173,7 @@ pub struct LibMainWorkerOptions {
   pub inspect_wait: bool,
   pub strace_ops: Option<Vec<String>>,
   pub is_inspecting: bool,
+  pub is_single_threaded: bool,
   /// If this is a `deno compile`-ed executable.
   pub is_standalone: bool,
   pub location: Option<Url>,

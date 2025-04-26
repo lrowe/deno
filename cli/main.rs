@@ -510,7 +510,7 @@ fn resolve_flags_and_init(
     );
   }
 
-  let default_v8_flags = match flags.subcommand {
+  let mut default_v8_flags = match flags.subcommand {
     DenoSubcommand::Lsp => vec![
       "--stack-size=1024".to_string(),
       "--js-explicit-resource-management".to_string(),
@@ -530,11 +530,21 @@ fn resolve_flags_and_init(
       ]
     }
   };
+  let is_single_threaded = !std::env::var("DENO_SINGLE_THREADED").unwrap_or_default().is_empty();
+  if is_single_threaded {
+    default_v8_flags.push("--single-threaded".to_string());
+  }
 
   init_v8_flags(&default_v8_flags, &flags.v8_flags, get_v8_flags_from_env());
+  let v8_platform =
+    if is_single_threaded {
+      Some(::deno_core::v8::Platform::new_single_threaded(true).make_shared())
+    } else {
+      None
+    };
   // TODO(bartlomieju): remove last argument once Deploy no longer needs it
   deno_core::JsRuntime::init_platform(
-    None, /* import assertions enabled */ false,
+    v8_platform, /* import assertions enabled */ false,
   );
 
   Ok(flags)

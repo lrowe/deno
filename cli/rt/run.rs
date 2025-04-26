@@ -940,6 +940,7 @@ pub async fn run(
     }
     checker
   });
+  let is_single_threaded = !std::env::var("DENO_SINGLE_THREADED").unwrap_or_default().is_empty();
   let lib_main_worker_options = LibMainWorkerOptions {
     argv: metadata.argv,
     log_level: WorkerLogLevel::Info,
@@ -950,6 +951,7 @@ pub async fn run(
     inspect_wait: false,
     strace_ops: None,
     is_inspecting: false,
+    is_single_threaded,
     is_standalone: true,
     skip_op_registration: true,
     location: metadata.location,
@@ -988,8 +990,14 @@ pub async fn run(
 
   // Initialize v8 once from the main thread.
   v8_set_flags(construct_v8_flags(&[], &metadata.v8_flags, vec![]));
+  let v8_platform =
+    if is_single_threaded {
+      Some(::deno_core::v8::Platform::new_single_threaded(true).make_shared())
+    } else {
+      None
+    };
   // TODO(bartlomieju): remove last argument once Deploy no longer needs it
-  deno_core::JsRuntime::init_platform(None, true);
+  deno_core::JsRuntime::init_platform(v8_platform, true);
 
   let main_module = match NpmPackageReqReference::from_specifier(&main_module) {
     Ok(package_ref) => {
